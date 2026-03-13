@@ -11,7 +11,7 @@ pub struct Config {
 }
 
 fn default_socket_path() -> String {
-    "/tmp/xrossd.sock".to_string()
+    "/var/run/xrossd.sock".to_string()
 }
 
 impl Config {
