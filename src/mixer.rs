@@ -28,6 +28,7 @@ pub struct MeterHistory{
     current_minute_peak: f32,
     last_reset: Instant,
     last_poll: Instant,
+    connected: bool,
 }
 
 impl MeterHistory {
@@ -38,6 +39,7 @@ impl MeterHistory {
             current_minute_peak: MIN_METER_VAL, // Start at silence
             last_reset: Instant::now(),
             last_poll: Instant::now(),
+            connected: true,
         }
     }
 
@@ -149,10 +151,18 @@ impl Mixer {
                 vec![OscType::String("/meters/0".to_string()), OscType::Int(31)]
             ).await?;
 
-            let meter = self.meter.lock().await;
+            let mut meter = self.meter.lock().await;
             let since_last_poll = Instant::now() - meter.last_poll;
             if since_last_poll > Duration::from_secs(30) {
-                log::warn!("Mixer is not connected!")
+                if meter.connected {
+                    meter.connected = false;
+                    log::warn!("Mixer disconnected!")
+                }
+            } else {
+                if !meter.connected {
+                    meter.connected = true;
+                    log::info!("Mixer reconnected!")
+                }
             }
         }
     }
