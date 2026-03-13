@@ -4,9 +4,12 @@ use anyhow::{Context,Result};
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt,BufReader};
+use tokio::signal;
+use env_logger::Env;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let conf = Config::load()?;
 
     let _ = std::fs::remove_file(&conf.socket_path);
@@ -15,14 +18,15 @@ async fn main() -> Result<()> {
 
     let mixer = Arc::new(Mixer::new(conf.mixer_addr).await?);
 
-    println!("{:?}", mixer);
-
-    println!("Daemon active");
+    log::info!("Daemon active");
 
     tokio::select! {
         res = mixer.heartbeat_loop() => res?,
         res = mixer.update_loop() => res?,
         res = cli_handler(uds_listener, Arc::clone(&mixer)) => res?,
+        _ = signal::ctrl_c() => {
+            log::info!("Shutdown signal received. Cleaning up...");
+        },
     }
 
     return Ok(())

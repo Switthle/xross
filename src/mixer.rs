@@ -27,6 +27,7 @@ pub struct MeterHistory{
 
     current_minute_peak: f32,
     last_reset: Instant,
+    last_poll: Instant,
 }
 
 impl MeterHistory {
@@ -36,10 +37,12 @@ impl MeterHistory {
             max_history_size: minutes,
             current_minute_peak: MIN_METER_VAL, // Start at silence
             last_reset: Instant::now(),
+            last_poll: Instant::now(),
         }
     }
 
     pub fn new_data(&mut self, meter: f32) {
+        self.last_poll = Instant::now();
         if meter > self.current_minute_peak {
             self.current_minute_peak = meter
         }
@@ -145,6 +148,12 @@ impl Mixer {
                 "/meters",
                 vec![OscType::String("/meters/0".to_string()), OscType::Int(31)]
             ).await?;
+
+            let meter = self.meter.lock().await;
+            let since_last_poll = Instant::now() - meter.last_poll;
+            if since_last_poll > Duration::from_secs(30) {
+                log::warn!("Mixer is not connected!")
+            }
         }
     }
 
