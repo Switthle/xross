@@ -650,13 +650,3 @@ dependencies = [
  "tokio",
  "xrossd_core",
 ]
-
-[[package]]
-name = "xrossd_test"
-version = "0.1.0"
-dependencies = [
- "rosc",
- "sscanf",
- "xrossd_core",
- "xrossd_macro",
-]

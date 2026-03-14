@@ -8,7 +8,7 @@ impl Mixer {
         if let Some(ready) = self.ready().await {
             let db = float_to_db(ready.lr_fader.val) + db;
             let val = db_to_float(db);
-            send_osc(&self.socket, "/lr/mix/on", vec![OscType::Float(val)]).await
+            send_osc(&self.socket, "/lr/mix/fader", vec![OscType::Float(val)]).await
         } else {
             Ok(())
         }
