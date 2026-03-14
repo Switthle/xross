@@ -1,0 +1,286 @@
+pub mod send;
+use anyhow::{Context,Result};
+use tokio::net::{UdpSocket,ToSocketAddrs};
+use tokio::time::{self, Duration, Instant};
+use tokio::sync::{Mutex,MutexGuard,MappedMutexGuard};
+use tokio_util::sync::CancellationToken;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::mem;
+use xrossd_macro::osc_state;
+use xrossd_core::field::{send_osc, recv_osc, parse_one_arg};
+use tokio::task::JoinSet;
+use rosc::{OscPacket, OscType};
+
+#[osc_state(num_chans=16,chan_prefix="/ch")]
+struct MixerState {
+    #[address("/lr/mix/fader")]
+    lr_fader: f32,
+    
+    #[address("/lr/mix/on")]
+    lr_on: bool,
+
+    #[per_chan]
+    #[address("/mix/fader")]
+    fader: f32,
+
+    #[per_chan]
+    #[address("/mix/on")]
+    on: bool,
+
+    #[per_chan]
+    #[address("/dyn/on")]
+    compressed: bool,
+}
+
+const MIN_METER_VAL: f32 = -128.0;
+#[derive(Debug)]
+pub struct MeterHistory{
+    history: VecDeque<f32>,
+    max_history_size: usize,
+
+    current_minute_peak: f32,
+    last_reset: Instant,
+    last_poll: Instant,
+}
+
+impl MeterHistory {
+    pub fn new(minutes: usize) -> Self {
+        Self {
+            history: VecDeque::with_capacity(minutes),
+            max_history_size: minutes,
+            current_minute_peak: MIN_METER_VAL, // Start at silence
+            last_reset: Instant::now(),
+            last_poll: Instant::now() - Duration::from_hours(1),
+        }
+    }
+
+    pub fn new_data(&mut self, meter: f32) {
+        self.last_poll = Instant::now();
+        if meter > self.current_minute_peak {
+            self.current_minute_peak = meter
+        }
+
+        if self.last_reset.elapsed() >= Duration::from_secs(60) {
+            if self.history.len() >= self.max_history_size {
+                self.history.pop_front();
+            }
+            self.history.push_back(self.current_minute_peak);
+
+            // Reset for the new minute
+            self.current_minute_peak = MIN_METER_VAL;
+            self.last_reset = Instant::now();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Mixer {
+    socket: UdpSocket,
+    state: Mutex<MixerState>,
+    meter: Mutex<MeterHistory>,
+
+    cancel: CancellationToken,
+    jobs: Mutex<JoinSet<()>>
+}
+
+impl Mixer {
+    pub async fn new<T: ToSocketAddrs>(addr: T) -> Arc<Self> {
+        log::info!("Mixer initializing...");
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        socket.connect(addr).await.unwrap();
+        let mixer = Arc::new(
+            Self {
+                socket,
+                state: Mutex::new(MixerState::Disconnected),
+                meter: Mutex::new(MeterHistory::new(30)),
+                cancel: CancellationToken::new(),
+                jobs: Mutex::new(JoinSet::new()),
+            }
+        );
+
+        {
+            let mut jobs = mixer.jobs.lock().await;
+            let mixer_shared = Arc::clone(&mixer);
+            let mixer_heartbeat = Arc::clone(&mixer);
+            jobs.spawn(async move {
+                tokio::select! {
+                    _ = mixer_shared.cancel.cancelled() => (),
+                    _ = mixer_shared.listen() => (),
+                    _ = mixer_heartbeat.heartbeat() => (),
+                }
+            });
+
+            time::sleep(Duration::from_millis(50)).await;
+
+            let mixer_shared = Arc::clone(&mixer);
+            jobs.spawn(async move {
+                tokio::select! {
+                    _ = mixer_shared.cancel.cancelled() => (),
+                    _ = mixer_shared.connect() => (),
+                }
+            });
+        }
+
+        mixer
+    }
+
+    pub async fn shutdown(&self) {
+        self.cancel.cancel();
+        let mut jobs = self.jobs.lock().await;
+        while let Some(_) = jobs.join_next().await {
+        }
+    }
+
+    pub async fn heartbeat(self: Arc<Self>) {
+        let mut interval = time::interval(Duration::from_secs(8));
+        loop {
+            interval.tick().await;
+            send_osc(&self.socket, "/xremote", vec![])
+                .await.unwrap();
+            send_osc(
+                &self.socket,
+                "/meters",
+                vec![OscType::String("/meters/0".to_string()), OscType::Int(31)]
+            ).await.unwrap();
+
+            let since_last_poll = {
+                let meter = &*self.meter.lock().await;
+                Instant::now() - meter.last_poll
+            };
+
+            let mut disconnection = false;
+            {
+                let mixer_state = &*self.state.lock().await;
+                if since_last_poll > Duration::from_secs(10) {
+                    match mixer_state {
+                        MixerState::Disconnected => {},
+                        _ => { disconnection = true; },
+                    }
+                } else {
+                    match mixer_state {
+                        MixerState::Disconnected => {
+                            let mixer_shared = Arc::clone(&self);
+                            let mut jobs = self.jobs.lock().await;
+                            jobs.spawn(async move {
+                                tokio::select! {
+                                    _ = mixer_shared.cancel.cancelled() => (),
+                                    _ = mixer_shared.connect() => (),
+                                }
+                            });
+                        },
+                        _ => {},
+                    }
+                }
+            }
+
+            if disconnection {
+                log::warn!("Mixer disconnected!");
+                let mut mixer_guard = self.state.lock().await;
+                let _ = mem::replace(&mut *mixer_guard, MixerState::Disconnected);
+            }
+        }
+    }
+
+    pub async fn listen(&self) {
+        let mut buf = [0u8; 4096];
+        loop {
+            let len = self.socket.recv(&mut buf).await.unwrap();
+            if let Ok((_, OscPacket::Message(msg))) = rosc::decoder::decode_udp(&buf[..len]) {
+                let addr = msg.addr.as_str();
+                match addr {
+                    "/meters/0" => {
+                        self.update_meter(msg.args).await.unwrap();
+                    },
+                    addr => {
+                        let arg = parse_one_arg(msg.args).unwrap();
+                        let state = &mut *self.state.lock().await;
+                        match state {
+                            MixerState::Disconnected => {},
+                            MixerState::Initializing(init) => {init.set_osc(addr, arg);},
+                            MixerState::Ready(ready) => {ready.update_osc(addr, arg);},
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    async fn update_meter(&self, args: Vec<OscType>) -> Result<()> {
+        let first_arg = args.get(0).context("Missing arg in /meters/0")?;
+
+        let bytes = match first_arg {
+            OscType::Blob(b) => b,
+            _ => anyhow::bail!("Argument is not a blob"),
+        };
+        let meter_data = &bytes[4..]; 
+        let values: Vec<f32> = meter_data
+            .chunks_exact(2)
+            .map(|chunk| {
+                // XR18 uses Little Endian for these 16-bit values
+                let raw = i16::from_le_bytes([chunk[0], chunk[1]]);
+                raw as f32 / 256.0
+            })
+            .collect();
+        let val = values
+            .get(4..5).context("Wrong size")?
+            .iter()
+            .copied()
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap_or(MIN_METER_VAL);
+
+        let mut meter_history = self.meter.lock().await;
+        meter_history.new_data(val);
+        Ok(())
+    }
+
+    pub async fn connect(&self) {
+        let mut next_sleep = Duration::from_secs(0);
+        loop {
+            tokio::time::sleep(next_sleep).await;
+            let mut mutex_guard = self.state.lock().await;
+            match &*mutex_guard {
+                MixerState::Ready(_) => {
+                    return
+                },
+                MixerState::Disconnected => {
+                    let meter = self.meter.lock().await;
+                    if Instant::now() - meter.last_poll < Duration::from_secs(5) {
+                        log::info!("Mixer connected. Initialization in progress.");
+                        let _ = mem::replace(&mut *mutex_guard, MixerState::Initializing(MixerStateInit::default()));
+                        next_sleep = Duration::from_millis(100);
+                    } else {
+                        next_sleep = Duration::from_secs(10);
+                    }
+                },
+                MixerState::Initializing(_) => {
+                    let state = mem::replace(&mut *mutex_guard, MixerState::Disconnected);
+                    if let MixerState::Initializing(mix_state) = state {
+                        match mix_state.try_init(&self.socket, Duration::from_millis(25)).await {
+                            Ok(ready) => {
+                                log::info!("Mixer initialized.");
+                                let _ = mem::replace(&mut *mutex_guard, MixerState::Ready(ready));
+                                next_sleep = Duration::from_secs(0);
+                            },
+                            Err(init) => {
+                                let _ = mem::replace(&mut *mutex_guard, MixerState::Initializing(init));
+                                next_sleep = Duration::from_millis(200);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    pub async fn ready(&self) -> Option<MappedMutexGuard<'_,MixerStateReady>> {
+        let mixer_guard = self.state.lock().await;
+        MutexGuard::try_map(mixer_guard, |s| {
+            match s {
+                MixerState::Ready(ready) => Some(ready),
+                _ => None
+            }
+        }).ok()
+    }
+}
+

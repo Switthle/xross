@@ -12,26 +12,23 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let conf = Config::load()?;
 
+    let mixer = Mixer::new(conf.mixer_addr).await;
+
     let _ = std::fs::remove_file(&conf.socket_path);
     let uds_listener =
         UnixListener::bind(&conf.socket_path).context("Could not bind Unix socket")?;
 
-    let mixer = Arc::new(Mixer::new(conf.mixer_addr).await?);
-
-    log::info!("Daemon active");
-
     tokio::select! {
-        res = mixer.heartbeat_loop() => res?,
-        res = mixer.update_loop() => res?,
         res = cli_handler(uds_listener, Arc::clone(&mixer)) => res?,
         _ = signal::ctrl_c() => {
             log::info!("Shutdown signal received. Cleaning up...");
         },
     }
 
+    let _ = std::fs::remove_file(&conf.socket_path);
+    let _ = mixer.shutdown().await;
     return Ok(())
 }
-
 async fn cli_handler(
     listener: UnixListener,
     mixer: Arc<Mixer>
@@ -55,4 +52,3 @@ async fn cli_handler(
         });
     }
 }
-

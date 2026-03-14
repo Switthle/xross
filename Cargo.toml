@@ -1,14 +1,6 @@
-[package]
-name = "xrossd"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-time = "=0.3.37"
-anyhow = "1.0.102"
-env_logger = "0.11.9"
-log = "0.4.29"
-rosc = "0.11.4"
-serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "signal"] }
-toml = "1.0.6"
+[workspace]
+resolver = "3"
+members = [
+    "xrossd_macro",
+    "xrossd", "xrossd_core", "xrossd_test",
+]
