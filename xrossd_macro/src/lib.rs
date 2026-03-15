@@ -1,7 +1,6 @@
-#![feature(array_try_map)]
 use proc_macro::TokenStream;
 use quote::{quote,format_ident};
-use syn::{parse_macro_input, LitInt, LitStr, ItemStruct};
+use syn::{parse_macro_input, LitInt, LitStr, ItemStruct, Type};
 
 struct FieldAttr {
     name: syn::Ident,
@@ -28,10 +27,100 @@ impl FieldAttr {
         }
     }
 
-    fn proto_to_field(&self) -> proc_macro2::TokenStream {
+    fn field_function(&self) -> proc_macro2::TokenStream {
         let name = &self.name;
-        quote! {
-            #name: self.#name.try_to_field()
+        let ty = &self.ty;
+
+        match ty {
+            Type::Path(tp) if tp.path.is_ident("bool") => {
+                let set_fn = format_ident!("{}{}", "set_", name);
+                let toggle_fn = format_ident!("{}{}", "toggle_", name);
+                quote!{
+                    pub async fn #set_fn(&self, socket: &::tokio::net::UdpSocket, val: bool) -> ::anyhow::Result<()> {
+                        self.#name.send(socket, val, "").await
+                    }
+
+                    pub async fn #toggle_fn(&self, socket: &::tokio::net::UdpSocket) -> ::anyhow::Result<()> {
+                        let val = !self.#name.val;
+                        self.#name.send(socket, val, "").await
+                    }
+                }
+            },
+            Type::Path(tp) if tp.path.is_ident("f32") => {
+                let set_fn = format_ident!("{}{}", "set_", name);
+                let inc_fn = format_ident!("{}{}", "inc_", name);
+                quote!{
+                    pub async fn #set_fn(&self, socket: &::tokio::net::UdpSocket, val: f32) -> ::anyhow::Result<()> {
+                        self.#name.send(socket, val, "").await
+                    }
+
+                    pub async fn #inc_fn(&self, socket: &::tokio::net::UdpSocket, inc: f32) -> ::anyhow::Result<()> {
+                        let val = self.#name.val + inc;
+                        self.#name.send(socket, val, "").await
+                    }
+                }
+            },
+            _ => quote! { },
+        }
+    }
+
+    fn chan_function(&self) -> proc_macro2::TokenStream {
+        let name = &self.name;
+        let ty = &self.ty;
+
+        match ty {
+            Type::Path(tp) if tp.path.is_ident("bool") => {
+                let set_fn = format_ident!("{}{}", "set_chan_", name);
+                let toggle_fn = format_ident!("{}{}", "toggle_chan_", name);
+                quote!{
+                    pub async fn #set_fn(&self, socket: &::tokio::net::UdpSocket, chan: usize, val: bool) -> ::anyhow::Result<()> {
+                        let prefix = format!("/ch/{:02}", chan);
+                        let channel = 
+                            ::anyhow::Context::context(
+                                self.channels.get(chan),
+                                "Wrong channel"
+                            )?;
+                        channel.#name.send(socket, val, &prefix).await
+                    }
+
+                    pub async fn #toggle_fn(&self, socket: &::tokio::net::UdpSocket, chan: usize) -> ::anyhow::Result<()> {
+                        let prefix = format!("/ch/{:02}", chan);
+                        let channel = 
+                            ::anyhow::Context::context(
+                                self.channels.get(chan),
+                                "Wrong channel"
+                            )?;
+                        let val = !channel.#name.val;
+                        channel.#name.send(socket, val, &prefix).await
+                    }
+                }
+            },
+            Type::Path(tp) if tp.path.is_ident("f32") => {
+                let set_fn = format_ident!("{}{}", "set_chan_", name);
+                let inc_fn = format_ident!("{}{}", "inc_chan_", name);
+                quote!{
+                    pub async fn #set_fn(&self, socket: &::tokio::net::UdpSocket, chan: usize, val: f32) -> ::anyhow::Result<()> {
+                        let prefix = format!("/ch/{:02}", chan);
+                        let channel = 
+                            ::anyhow::Context::context(
+                                self.channels.get(chan),
+                                "Wrong channel"
+                            )?;
+                        channel.#name.send(socket, val, &prefix).await
+                    }
+                    pub async fn #inc_fn(&self, socket: &::tokio::net::UdpSocket, chan: usize, inc: f32) -> ::anyhow::Result<()> {
+                        let prefix = format!("/ch/{:02}", chan);
+                        let channel = 
+                            ::anyhow::Context::context(
+                                self.channels.get(chan),
+                                "Wrong channel"
+                            )?;
+                        let val = channel.#name.val + inc;
+                        channel.#name.send(socket, val, &prefix).await
+                    }
+                }
+            },
+            _ => quote! { },
         }
     }
 
@@ -51,7 +140,7 @@ impl FieldAttr {
         quote!{
             if self.#name.val == None {
                 init = false;
-                ::xrossd_core::field::ask_and_wait(socket, #addr, Some(duration)).await;
+                let _ = ::xrossd_core::field::ask_and_wait(socket, #addr, Some(duration)).await;
             }
         }
     }
@@ -65,7 +154,7 @@ impl FieldAttr {
             exprs.push(quote! {
                 if self.channels[#chan].#name.val == None {
                     init = false;
-                    ::xrossd_core::field::ask_and_wait(socket, #addr, Some(duration)).await;
+                    let _ = ::xrossd_core::field::ask_and_wait(socket, #addr, Some(duration)).await;
                 }
             })
         }
@@ -168,6 +257,16 @@ pub fn osc_state(attr: TokenStream, input: TokenStream) -> TokenStream {
         .map(|f| f.init_chan_field(num_chans, &chan_prefix))
         .collect();
 
+    let field_funcs: Vec<_> =
+        field_attrs.iter()
+        .map(|f| f.field_function())
+        .collect();
+
+    let chan_funcs: Vec<_> =
+        chan_field_attrs.iter()
+        .map(|f| f.chan_function())
+        .collect();
+
     quote! {
         #[derive(Debug)]
         struct #channel_ready_name {
@@ -188,30 +287,40 @@ pub fn osc_state(attr: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         #[derive(Debug)]
-        struct #ready_name {
+        pub struct #ready_name {
             #(#fields,)*
             channels: [#channel_ready_name;#num_chans]
         }
         #[derive(Debug,Default)]
-        struct #init_name {
+        pub struct #init_name {
             #(#protofields,)*
             channels: [#channel_init_name;#num_chans]
         }
         #[derive(Debug)]
-        enum #struct_name {
+        pub enum #struct_name {
             Disconnected,
             Initializing(#init_name),
             Ready(#ready_name),
         }
 
         impl #ready_name {
-            pub fn update_osc(&mut self, addr: &str, val: ::rosc::OscType) {
-                let _ = match addr {
+            #(#field_funcs)*
+            #(#chan_funcs)*
+
+            pub fn update_osc(&mut self, addr: &str, val: ::rosc::OscType) -> ::anyhow::Result<()> {
+                match addr {
                     s if s.starts_with(#chan_prefix) => {
                         let tail = s.strip_prefix(#chan_prefix).unwrap();
-                        let (chan_no, end_addr) = ::sscanf::sscanf!(tail, "/{usize}{String}").unwrap();
-                        let Some(mut chan) = self.channels.get_mut(chan_no-1)
-                            else { return };
+                        let (chan_no, end_addr) =
+                            ::anyhow::Context::context(
+                                ::sscanf::sscanf!(tail, "/{usize}{String}"),
+                                "failed to parse address"
+                            )?;
+                        let mut chan = 
+                            ::anyhow::Context::context(
+                                self.channels.get_mut(chan_no-1),
+                                "wrong channel number in update_osc"
+                            )?;
                         match end_addr.as_str() {
                             #(#match_arms_chan_update,)*
                             _ => Ok(())
@@ -219,7 +328,7 @@ pub fn osc_state(attr: TokenStream, input: TokenStream) -> TokenStream {
                     },
                     #(#match_arms_update,)*
                     _ => Ok(())
-                };
+                }
             }
         }
 
@@ -240,13 +349,16 @@ pub fn osc_state(attr: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
 
-            pub fn set_osc(&mut self, addr: &str, val: ::rosc::OscType) {
-                let _ = match addr {
+            pub fn set_osc(&mut self, addr: &str, val: ::rosc::OscType) -> ::anyhow::Result<()> {
+                match addr {
                     s if s.starts_with(#chan_prefix) => {
                         let tail = s.strip_prefix(#chan_prefix).unwrap();
                         let (chan_no, end_addr) = ::sscanf::sscanf!(tail, "/{usize}{String}").unwrap();
-                        let Some(mut chan) = self.channels.get_mut(chan_no-1)
-                            else { return };
+                        let mut chan =
+                            ::anyhow::Context::context(
+                                self.channels.get_mut(chan_no-1),
+                                "wrong channel number in update_osc"
+                            )?;
                         match end_addr.as_str() {
                             #(#match_arms_chan_set,)*
                             _ => Ok(())
@@ -254,7 +366,7 @@ pub fn osc_state(attr: TokenStream, input: TokenStream) -> TokenStream {
                     },
                     #(#match_arms_set,)*
                     _ => Ok(())
-                };
+                }
             }
         }
     }.into()

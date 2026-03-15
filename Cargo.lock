@@ -634,6 +634,7 @@ name = "xrossd_core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "rosc",
  "tokio",
 ]
@@ -649,4 +650,14 @@ dependencies = [
  "syn",
  "tokio",
  "xrossd_core",
+]
+
+[[package]]
+name = "xrossd_test"
+version = "0.1.0"
+dependencies = [
+ "rosc",
+ "sscanf",
+ "xrossd_core",
+ "xrossd_macro",
 ]

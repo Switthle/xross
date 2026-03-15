@@ -8,7 +8,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::mem;
 use xrossd_macro::osc_state;
-use xrossd_core::field::{send_osc, recv_osc, parse_one_arg};
+use xrossd_core::field::{send_osc, parse_one_arg};
+use xrossd_core::errors::LogEntryExt;
 use tokio::task::JoinSet;
 use rosc::{OscPacket, OscType};
 
@@ -136,13 +137,15 @@ impl Mixer {
         let mut interval = time::interval(Duration::from_secs(8));
         loop {
             interval.tick().await;
-            send_osc(&self.socket, "/xremote", vec![])
-                .await.unwrap();
-            send_osc(
-                &self.socket,
-                "/meters",
-                vec![OscType::String("/meters/0".to_string()), OscType::Int(31)]
-            ).await.unwrap();
+            if send_osc(&self.socket, "/xremote", vec![])
+                .await.log_err().is_err() { continue };
+            if send_osc(
+                    &self.socket,
+                    "/meters",
+                    vec![OscType::String("/meters/0".to_string()), OscType::Int(31)]
+                ).await.log_err().is_err() {
+                continue
+            };
 
             let since_last_poll = {
                 let meter = &*self.meter.lock().await;
@@ -185,20 +188,34 @@ impl Mixer {
     pub async fn listen(&self) {
         let mut buf = [0u8; 4096];
         loop {
-            let len = self.socket.recv(&mut buf).await.unwrap();
+            let Ok(len) = self.socket.recv(&mut buf).await.log_err() else {
+                continue;
+            };
             if let Ok((_, OscPacket::Message(msg))) = rosc::decoder::decode_udp(&buf[..len]) {
                 let addr = msg.addr.as_str();
                 match addr {
                     "/meters/0" => {
-                        self.update_meter(msg.args).await.unwrap();
+                        if self.update_meter(msg.args).await.log_err().is_err() {
+                            continue
+                        };
                     },
                     addr => {
-                        let arg = parse_one_arg(msg.args).unwrap();
+                        let Ok(arg) = parse_one_arg(msg.args).log_err() else {
+                            continue;
+                        };
                         let state = &mut *self.state.lock().await;
                         match state {
                             MixerState::Disconnected => {},
-                            MixerState::Initializing(init) => {init.set_osc(addr, arg);},
-                            MixerState::Ready(ready) => {ready.update_osc(addr, arg);},
+                            MixerState::Initializing(init) => {
+                                if init.set_osc(addr, arg).log_err().is_err() {
+                                    continue;
+                                };
+                            },
+                            MixerState::Ready(ready) => {
+                                if ready.update_osc(addr, arg).log_err().is_err() {
+                                    continue;
+                                };
+                            },
                         };
                     }
                 }

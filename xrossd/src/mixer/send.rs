@@ -1,4 +1,4 @@
-use anyhow::{Context,Result};
+use anyhow::Result;
 use xrossd_core::field::send_osc;
 use rosc::OscType;
 use crate::mixer::Mixer;
@@ -14,44 +14,27 @@ impl Mixer {
         }
     }
 
-    async fn toggle_mute(&self) -> Result<()> {
-        if let Some(ready) = self.ready().await {
-            let val = if ready.lr_on.val { 0 } else { 1 };
-            send_osc(&self.socket, "/lr/mix/on", vec![OscType::Int(val)]).await
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn toggle_comp(&self, chan: usize) -> Result<()> {
-        if let Some(ready) = self.ready().await {
-            let channel = ready
-                .channels.get(chan).context("Wrong channel number")?;
-            let val = if channel.compressed.val { 0 } else { 1 };
-            let addr = format!("/ch/{:02}/dyn/on", chan);
-            send_osc(&self.socket, &addr, vec![OscType::Int(val)]).await
-        } else {
-            Ok(())
-        }
-    }
-
     pub async fn exec_cmd(&self, cmd: &str, val: &[&str]) -> Result<()> {
-        match cmd {
-            "inc-vol" => {
-                let inc_vol: f64 = val[0].parse()?;
-                self.inc_fader(inc_vol).await
-            },
-            "toggle-mute" => {
-                self.toggle_mute().await
-            },
-            "toggle-comp" => {
-                let chan: usize = val[0].parse()?;
-                self.toggle_comp(chan).await
-            },
-            _ => {
-                println!("Unknown command {}", cmd);
-                Ok(())
+        if let Some(ready) = self.ready().await {
+            match cmd {
+                "inc-vol" => {
+                    let inc_vol: f64 = val[0].parse()?;
+                    self.inc_fader(inc_vol).await
+                },
+                "toggle-mute" => {
+                    ready.toggle_lr_on(&self.socket).await
+                },
+                "toggle-comp" => {
+                    let chan: usize = val[0].parse()?;
+                    ready.toggle_chan_compressed(&self.socket, chan).await
+                },
+                _ => {
+                    println!("Unknown command {}", cmd);
+                    Ok(())
+                }
             }
+        } else {
+            anyhow::bail!("Command received while mixer not initialized");
         }
     }
 }

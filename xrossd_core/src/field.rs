@@ -59,6 +59,11 @@ impl<const ADDR: &'static str> Field<ADDR,f32> {
         self.update(val);
         Ok(())
     }
+
+    pub async fn send(&self, socket: &UdpSocket, val: f32, prefix: &str) -> Result<()> {
+        let addr = format!("{}{}", prefix, ADDR);
+        send_osc(socket, &addr, vec![OscType::Float(val)]).await
+    }
 }
 
 impl<const ADDR: &'static str> Field<ADDR,bool> {
@@ -66,6 +71,12 @@ impl<const ADDR: &'static str> Field<ADDR,bool> {
         let val = val.int().context("Wrong type")?;
         self.update(val != 0);
         Ok(())
+    }
+
+    pub async fn send(&self, socket: &UdpSocket, val: bool, prefix: &str) -> Result<()> {
+        let addr = format!("{}{}", prefix, ADDR);
+        let val = if val { OscType::Int(1) } else { OscType::Int(0) };
+        send_osc(socket, &addr, vec![val]).await
     }
 }
 
@@ -106,16 +117,6 @@ pub fn parse_one_arg(args: Vec<OscType>) -> Result<OscType> {
     .first()
     .context("Wrong length")
     .cloned()
-}
-
-fn parse_bool(args: Vec<OscType>) -> Result<bool> {
-    let arg = parse_one_arg(args)?;
-    Ok(arg.int().context("Wrong type")? == 1)
-}
-
-fn parse_float(args: Vec<OscType>) -> Result<f32> {
-    let arg = parse_one_arg(args)?;
-    arg.float().context("Wrong type")
 }
 
 pub async fn ask_and_wait(socket: &UdpSocket,addr: &str, wait: Option<Duration>) ->
