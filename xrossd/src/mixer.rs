@@ -1,4 +1,5 @@
 pub mod send;
+use std::process::Command;
 use anyhow::{Context,Result};
 use tokio::net::{UdpSocket,ToSocketAddrs};
 use tokio::time::{self, Duration, Instant};
@@ -12,6 +13,7 @@ use xrossd_core::field::{send_osc, parse_one_arg};
 use xrossd_core::errors::LogEntryExt;
 use tokio::task::JoinSet;
 use rosc::{OscPacket, OscType};
+use crate::config::ConfigTimeout;
 
 #[osc_state(num_chans=16,chan_prefix="/ch")]
 struct MixerState {
@@ -36,7 +38,15 @@ struct MixerState {
 
 const MIN_METER_VAL: f32 = -128.0;
 #[derive(Debug)]
+pub enum Timeout{
+    TimedOut,
+    Running,
+}
+
+#[derive(Debug)]
 pub struct MeterHistory{
+    config: Option<ConfigTimeout>,
+    status: Timeout,
     history: VecDeque<f32>,
     max_history_size: usize,
 
@@ -46,8 +56,11 @@ pub struct MeterHistory{
 }
 
 impl MeterHistory {
-    pub fn new(minutes: usize) -> Self {
+    pub fn new(config: Option<ConfigTimeout>) -> Self {
+        let minutes = config.as_ref().map_or(0, |c| c.after_mins);
         Self {
+            config: config,
+            status: Timeout::Running,
             history: VecDeque::with_capacity(minutes),
             max_history_size: minutes,
             current_minute_peak: MIN_METER_VAL, // Start at silence
@@ -63,15 +76,21 @@ impl MeterHistory {
         }
 
         if self.last_reset.elapsed() >= Duration::from_secs(60) {
-            if self.history.len() >= self.max_history_size {
-                self.history.pop_front();
+            if self.is_timeout() {
+                if self.history.len() >= self.max_history_size {
+                    self.history.pop_front();
+                }
+                self.history.push_back(self.current_minute_peak);
             }
-            self.history.push_back(self.current_minute_peak);
 
             // Reset for the new minute
             self.current_minute_peak = MIN_METER_VAL;
             self.last_reset = Instant::now();
         }
+    }
+
+    pub fn is_timeout(&self) -> bool {
+        return self.max_history_size > 0;
     }
 }
 
@@ -86,7 +105,7 @@ pub struct Mixer {
 }
 
 impl Mixer {
-    pub async fn new<T: ToSocketAddrs>(addr: T) -> Arc<Self> {
+    pub async fn new<T: ToSocketAddrs>(addr: T, timeout: Option<ConfigTimeout>) -> Arc<Self> {
         log::info!("Mixer initializing...");
         let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
         socket.connect(addr).await.unwrap();
@@ -94,7 +113,7 @@ impl Mixer {
             Self {
                 socket,
                 state: Mutex::new(MixerState::Disconnected),
-                meter: Mutex::new(MeterHistory::new(30)),
+                meter: Mutex::new(MeterHistory::new(timeout)),
                 cancel: CancellationToken::new(),
                 jobs: Mutex::new(JoinSet::new()),
             }
@@ -111,6 +130,16 @@ impl Mixer {
                     _ = mixer_heartbeat.heartbeat() => (),
                 }
             });
+
+            if mixer.meter.lock().await.is_timeout() {
+                let mixer_shared = Arc::clone(&mixer);
+                jobs.spawn(async move {
+                    tokio::select! {
+                        _ = mixer_shared.cancel.cancelled() => (),
+                        _ = mixer_shared.check_timeout() => (),
+                    }
+                });
+            }
 
             time::sleep(Duration::from_millis(50)).await;
 
@@ -217,6 +246,54 @@ impl Mixer {
                                 };
                             },
                         };
+                    }
+                }
+            }
+        }
+    }
+
+    async fn check_timeout(&self) -> Result<()> {
+        {
+            let meter = self.meter.lock().await;
+            if !meter.is_timeout() {
+                anyhow::bail!("Timeout not set in config");
+            }
+        }
+        loop {
+            time::sleep(Duration::from_secs(60)).await;
+            let mut meter = self.meter.lock().await;
+            let mut timedout = false;
+            if meter.history.len() == meter.max_history_size {
+            let Some(max_meter) =
+                meter.history.iter().max_by(|a,b| a.total_cmp(b)).copied()
+            else { continue };
+                if max_meter < meter.config.as_ref().unwrap().db_threshold {
+                    timedout = true;
+                }
+            }
+
+            match meter.status {
+                Timeout::TimedOut => {
+                    if !timedout {
+                        meter.status = Timeout::Running;
+                    }
+                },
+                Timeout::Running => {
+                    if timedout {
+                        meter.status = Timeout::TimedOut;
+                        let status = Command::new("sh")
+                            .arg("-c")
+                            .arg(meter.config.as_ref().unwrap().command.clone())
+                            .status();
+                        let Ok(status) = status.log_err() else {
+                            continue;
+                        };
+
+                        if status.success() {
+                            log::info!("Timeout command executed successfully")
+                        } else {
+                            log::warn!("Timeout command failed")
+                        }
                     }
                 }
             }

@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let conf = Config::load()?;
 
-    let mixer = Mixer::new(conf.mixer_addr).await;
+    let mixer = Mixer::new(conf.mixer_addr, conf.timeout).await;
 
     let _ = std::fs::remove_file(&conf.socket_path);
     let uds_listener =

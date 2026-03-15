@@ -8,6 +8,15 @@ pub struct Config {
                                     //
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
+
+    pub timeout: Option<ConfigTimeout>
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ConfigTimeout {
+    pub command: String,
+    pub after_mins: usize,
+    pub db_threshold: f32
 }
 
 fn default_socket_path() -> String {
