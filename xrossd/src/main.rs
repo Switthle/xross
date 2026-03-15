@@ -6,6 +6,7 @@ use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt,BufReader};
 use tokio::signal;
 use env_logger::Env;
+use xrossd_core::errors::LogEntryExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,7 +45,7 @@ async fn cli_handler(
                 let mut cmd_iter = cmd.split_whitespace();
                 if let Some(cmd) = cmd_iter.next() {
                     let vals: Vec<&str> = cmd_iter.collect();
-                    let _ = mixer.exec_cmd(cmd, &vals).await;
+                    let _ = mixer.exec_cmd(cmd, &vals).await.log_err();
                 }
                 line.clear();
 

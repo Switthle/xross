@@ -3,5 +3,5 @@ resolver = "3"
 members = [
     "xrossd_macro",
     "xrossd", "xrossd_core",
-	"xrossd_test"
+	#"xrossd_test"
 ]

@@ -42,13 +42,15 @@ impl FieldAttr {
 
                     pub async fn #toggle_fn(&self, socket: &::tokio::net::UdpSocket) -> ::anyhow::Result<()> {
                         let val = !self.#name.val;
-                        self.#name.send(socket, val, "").await
+                        self.#set_fn(socket, val).await
                     }
                 }
             },
             Type::Path(tp) if tp.path.is_ident("f32") => {
                 let set_fn = format_ident!("{}{}", "set_", name);
                 let inc_fn = format_ident!("{}{}", "inc_", name);
+                let set_db_fn = format_ident!("{}{}", "set_db_", name);
+                let inc_db_fn = format_ident!("{}{}", "inc_db_", name);
                 quote!{
                     pub async fn #set_fn(&self, socket: &::tokio::net::UdpSocket, val: f32) -> ::anyhow::Result<()> {
                         self.#name.send(socket, val, "").await
@@ -56,8 +58,19 @@ impl FieldAttr {
 
                     pub async fn #inc_fn(&self, socket: &::tokio::net::UdpSocket, inc: f32) -> ::anyhow::Result<()> {
                         let val = self.#name.val + inc;
-                        self.#name.send(socket, val, "").await
+                        self.#set_fn(socket, val).await
                     }
+
+                    pub async fn #set_db_fn(&self, socket: &::tokio::net::UdpSocket, db: f64) -> ::anyhow::Result<()> {
+                        let val = ::xrossd_core::conv::db_to_float(db);
+                        self.#set_fn(socket, val).await
+                    }
+
+                    pub async fn #inc_db_fn(&self, socket: &::tokio::net::UdpSocket, inc: f64) -> ::anyhow::Result<()> {
+                        let db = ::xrossd_core::conv::float_to_db(self.#name.val) + inc;
+                        self.#set_db_fn(socket, db).await
+                    }
+
                 }
             },
             _ => quote! { },
@@ -98,6 +111,8 @@ impl FieldAttr {
             Type::Path(tp) if tp.path.is_ident("f32") => {
                 let set_fn = format_ident!("{}{}", "set_chan_", name);
                 let inc_fn = format_ident!("{}{}", "inc_chan_", name);
+                let set_db_fn = format_ident!("{}{}", "set_db_chan_", name);
+                let inc_db_fn = format_ident!("{}{}", "inc_db_chan_", name);
                 quote!{
                     pub async fn #set_fn(&self, socket: &::tokio::net::UdpSocket, chan: usize, val: f32) -> ::anyhow::Result<()> {
                         let prefix = format!("/ch/{:02}", chan);
@@ -109,14 +124,27 @@ impl FieldAttr {
                         channel.#name.send(socket, val, &prefix).await
                     }
                     pub async fn #inc_fn(&self, socket: &::tokio::net::UdpSocket, chan: usize, inc: f32) -> ::anyhow::Result<()> {
-                        let prefix = format!("/ch/{:02}", chan);
                         let channel = 
                             ::anyhow::Context::context(
                                 self.channels.get(chan),
                                 "Wrong channel"
                             )?;
                         let val = channel.#name.val + inc;
-                        channel.#name.send(socket, val, &prefix).await
+                        self.#set_fn(socket, chan, val).await
+                    }
+                    pub async fn #set_db_fn(&self, socket: &::tokio::net::UdpSocket, chan: usize, db: f64) -> ::anyhow::Result<()> {
+                        let val = ::xrossd_core::conv::db_to_float(db);
+                        self.#set_fn(socket, chan, val).await
+                    }
+
+                    pub async fn #inc_db_fn(&self, socket: &::tokio::net::UdpSocket, chan: usize, inc: f64) -> ::anyhow::Result<()> {
+                        let channel = 
+                            ::anyhow::Context::context(
+                                self.channels.get(chan),
+                                "Wrong channel"
+                            )?;
+                        let db = ::xrossd_core::conv::float_to_db(channel.#name.val) + inc;
+                        self.#set_db_fn(socket, chan, db).await
                     }
                 }
             },
