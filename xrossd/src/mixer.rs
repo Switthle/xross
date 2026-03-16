@@ -1,5 +1,6 @@
 pub mod send;
 use std::process::Command;
+use std::iter;
 use anyhow::{Context,Result};
 use tokio::net::{UdpSocket,ToSocketAddrs};
 use tokio::time::{self, Duration, Instant};
@@ -51,7 +52,6 @@ pub struct MeterHistory{
     max_history_size: usize,
 
     current_minute_peak: f32,
-    last_reset: Instant,
     last_poll: Instant,
 }
 
@@ -64,7 +64,6 @@ impl MeterHistory {
             history: VecDeque::with_capacity(minutes),
             max_history_size: minutes,
             current_minute_peak: MIN_METER_VAL, // Start at silence
-            last_reset: Instant::now(),
             last_poll: Instant::now() - Duration::from_hours(1),
         }
     }
@@ -74,23 +73,35 @@ impl MeterHistory {
         if meter > self.current_minute_peak {
             self.current_minute_peak = meter
         }
-
-        if self.last_reset.elapsed() >= Duration::from_secs(60) {
-            if self.is_timeout() {
-                if self.history.len() >= self.max_history_size {
-                    self.history.pop_front();
-                }
-                self.history.push_back(self.current_minute_peak);
-            }
-
-            // Reset for the new minute
-            self.current_minute_peak = MIN_METER_VAL;
-            self.last_reset = Instant::now();
-        }
     }
 
-    pub fn is_timeout(&self) -> bool {
+    pub fn push_data(&mut self) {
+        if self.has_history() {
+            if self.history.len() >= self.max_history_size {
+                self.history.pop_front();
+            }
+            self.history.push_back(self.current_minute_peak);
+        }
+
+        // Reset for the new minute
+        self.current_minute_peak = MIN_METER_VAL;
+    }
+
+    pub fn reset(&mut self) {
+        self.history.clear();
+    }
+
+    pub fn has_history(&self) -> bool {
         return self.max_history_size > 0;
+    }
+
+    pub fn peak(&self) -> Option<f32> {
+        self
+            .history
+            .iter()
+            .chain(iter::once(&self.current_minute_peak))
+            .max_by(|a,b| a.total_cmp(b))
+            .copied()
     }
 }
 
@@ -128,10 +139,11 @@ impl Mixer {
                     _ = mixer_shared.cancel.cancelled() => (),
                     _ = mixer_shared.listen() => (),
                     _ = mixer_heartbeat.heartbeat() => (),
+                    _ = mixer_shared.history() => (),
                 }
             });
 
-            if mixer.meter.lock().await.is_timeout() {
+            if mixer.meter.lock().await.has_history() {
                 let mixer_shared = Arc::clone(&mixer);
                 jobs.spawn(async move {
                     tokio::select! {
@@ -159,6 +171,15 @@ impl Mixer {
         self.cancel.cancel();
         let mut jobs = self.jobs.lock().await;
         while let Some(_) = jobs.join_next().await {
+        }
+    }
+
+    pub async fn history(&self) {
+        let mut interval = time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let mut meter = self.meter.lock().await;
+            meter.push_data();
         }
     }
 
@@ -255,7 +276,7 @@ impl Mixer {
     async fn check_timeout(&self) -> Result<()> {
         {
             let meter = self.meter.lock().await;
-            if !meter.is_timeout() {
+            if !meter.has_history() {
                 anyhow::bail!("Timeout not set in config");
             }
         }
@@ -264,9 +285,7 @@ impl Mixer {
             let mut meter = self.meter.lock().await;
             let mut timedout = false;
             if meter.history.len() == meter.max_history_size {
-            let Some(max_meter) =
-                meter.history.iter().max_by(|a,b| a.total_cmp(b)).copied()
-            else { continue };
+                let Some(max_meter) = meter.peak() else { continue };
                 if max_meter < meter.config.as_ref().unwrap().db_threshold {
                     timedout = true;
                 }
