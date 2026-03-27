@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::fs;
 use anyhow::{Context, Result};
+use crate::cli::config_path;
+use xross_core::constants::DEFAULT_SOCKET;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
@@ -20,12 +22,13 @@ pub struct ConfigTimeout {
 }
 
 fn default_socket_path() -> String {
-    "/var/run/xrossd.sock".to_string()
+    DEFAULT_SOCKET.to_string()
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let content = fs::read_to_string("xrossd.toml")
+        let path = config_path();
+        let content = fs::read_to_string(path)
             .context("Could not find xrossd.toml")?;
         
         let cfg: Config = toml::from_str(&content)

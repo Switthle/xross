@@ -183,6 +183,11 @@ impl Mixer {
         }
     }
 
+    pub async fn reset_history(&self) {
+        let mut history = self.meter.lock().await;
+        history.reset();
+    }
+
     pub async fn heartbeat(self: Arc<Self>) {
         let mut interval = time::interval(Duration::from_secs(8));
         loop {
