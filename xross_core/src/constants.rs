@@ -1,1 +1,1 @@
-pub const DEFAULT_SOCKET: &str = "/var/run/xrossd.sock";
+pub const DEFAULT_SOCKET: &str = "/run/xross/xrossd.sock";
