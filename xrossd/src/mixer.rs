@@ -88,7 +88,23 @@ impl MeterHistory {
     }
 
     pub fn reset(&mut self) {
-        self.history.clear();
+        if self.has_history() {
+            self.history.clear();
+            let on_reset = self.config.as_ref().unwrap().on_reset.clone();
+            if let Some(cmd) = on_reset {
+                let status = Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .status();
+                if let Ok(status) = status.log_err() {
+                    if status.success() {
+                        log::info!("Timeout command executed successfully")
+                    } else {
+                        log::warn!("Timeout command failed")
+                    }
+                }
+            }
+        }
     }
 
     pub fn has_history(&self) -> bool {
@@ -305,18 +321,21 @@ impl Mixer {
                 Timeout::Running => {
                     if timedout {
                         meter.status = Timeout::TimedOut;
-                        let status = Command::new("sh")
-                            .arg("-c")
-                            .arg(meter.config.as_ref().unwrap().command.clone())
-                            .status();
-                        let Ok(status) = status.log_err() else {
-                            continue;
-                        };
+                        let on_timeout = meter.config.as_ref().unwrap().on_timeout.clone();
+                        if let Some(cmd) = on_timeout {
+                            let status = Command::new("sh")
+                                .arg("-c")
+                                .arg(cmd)
+                                .status();
+                            let Ok(status) = status.log_err() else {
+                                continue;
+                            };
 
-                        if status.success() {
-                            log::info!("Timeout command executed successfully")
-                        } else {
-                            log::warn!("Timeout command failed")
+                            if status.success() {
+                                log::info!("Timeout command executed successfully")
+                            } else {
+                                log::warn!("Timeout command failed")
+                            }
                         }
                     }
                 }

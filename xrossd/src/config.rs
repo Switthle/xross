@@ -16,7 +16,8 @@ pub struct Config {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ConfigTimeout {
-    pub command: String,
+    pub on_timeout: Option<String>,
+    pub on_reset: Option<String>,
     pub after_mins: usize,
     pub db_threshold: f32
 }
