@@ -98,9 +98,9 @@ impl MeterHistory {
                     .status();
                 if let Ok(status) = status.log_err() {
                     if status.success() {
-                        log::info!("Timeout command executed successfully")
+                        log::info!("Reset command executed successfully")
                     } else {
-                        log::warn!("Timeout command failed")
+                        log::warn!("Reset command failed")
                     }
                 }
             }
@@ -298,11 +298,13 @@ impl Mixer {
         {
             let meter = self.meter.lock().await;
             if !meter.has_history() {
+                log::warn!("Timeout not set in config");
                 anyhow::bail!("Timeout not set in config");
             }
         }
+        let mut interval = time::interval(Duration::from_secs(60));
         loop {
-            time::sleep(Duration::from_secs(60)).await;
+            interval.tick().await;
             let mut meter = self.meter.lock().await;
             let mut timedout = false;
             if meter.history.len() == meter.max_history_size {
