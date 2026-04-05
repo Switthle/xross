@@ -368,7 +368,6 @@ impl Mixer {
                 raw as f32 / 256.0
             })
             .collect();
-        println!("{:?}", values);
         let val = values
             .get(4..5).context("Wrong size")?
             .iter()
