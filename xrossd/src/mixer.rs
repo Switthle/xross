@@ -38,7 +38,7 @@ struct MixerState {
 }
 
 const MIN_METER_VAL: f32 = -128.0;
-#[derive(Debug)]
+#[derive(Debug,PartialEq,Clone)]
 pub enum Timeout{
     TimedOut,
     Running,
@@ -90,18 +90,53 @@ impl MeterHistory {
     pub fn reset(&mut self) {
         if self.has_history() {
             self.history.clear();
-            let on_reset = self.config.as_ref().unwrap().on_reset.clone();
-            if let Some(cmd) = on_reset {
+            if self.status == Timeout::TimedOut {
+                self.status = Timeout::Running;
+                let on_reset = self.config.as_ref().unwrap().on_reset.clone();
+                if let Some(cmd) = on_reset {
+                    let status = Command::new("sh")
+                        .arg("-c")
+                        .arg(cmd)
+                        .status();
+                    if let Ok(status) = status.log_err() {
+                        if status.success() {
+                            log::info!("Reset command executed successfully")
+                        } else {
+                            log::warn!("Reset command failed")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn timeout(&mut self) {
+        if !self.has_history() { return }
+
+        if self.history.len() < self.max_history_size {
+            return
+        }
+        let Some(max_meter) = self.peak() else { return };
+        if max_meter >= self.config.as_ref().unwrap().db_threshold {
+            return
+        }
+
+        if self.status == Timeout::Running {
+            self.status = Timeout::TimedOut;
+            let on_timeout = self.config.as_ref().unwrap().on_timeout.clone();
+            if let Some(cmd) = on_timeout {
                 let status = Command::new("sh")
                     .arg("-c")
                     .arg(cmd)
                     .status();
-                if let Ok(status) = status.log_err() {
-                    if status.success() {
-                        log::info!("Reset command executed successfully")
-                    } else {
-                        log::warn!("Reset command failed")
-                    }
+                let Ok(status) = status.log_err() else {
+                    return;
+                };
+
+                if status.success() {
+                    log::info!("Timeout command executed successfully")
+                } else {
+                    log::warn!("Timeout command failed")
                 }
             }
         }
@@ -208,15 +243,22 @@ impl Mixer {
         let mut interval = time::interval(Duration::from_secs(8));
         loop {
             interval.tick().await;
-            if send_osc(&self.socket, "/xremote", vec![])
-                .await.log_err().is_err() { continue };
-            if send_osc(
-                    &self.socket,
-                    "/meters",
-                    vec![OscType::String("/meters/0".to_string()), OscType::Int(31)]
-                ).await.log_err().is_err() {
-                continue
+            let meter_status = {
+                let meter = self.meter.lock().await;
+                meter.status.clone()
             };
+
+            if meter_status == Timeout::Running {
+                if send_osc(&self.socket, "/xremote", vec![])
+                    .await.log_err().is_err() { continue };
+                if send_osc(
+                        &self.socket,
+                        "/meters",
+                        vec![OscType::String("/meters/0".to_string()), OscType::Int(31)]
+                    ).await.log_err().is_err() {
+                    continue
+                };
+            }
 
             let since_last_poll = {
                 let meter = &*self.meter.lock().await;
@@ -306,42 +348,7 @@ impl Mixer {
         loop {
             interval.tick().await;
             let mut meter = self.meter.lock().await;
-            let mut timedout = false;
-            if meter.history.len() == meter.max_history_size {
-                let Some(max_meter) = meter.peak() else { continue };
-                if max_meter < meter.config.as_ref().unwrap().db_threshold {
-                    timedout = true;
-                }
-            }
-
-            match meter.status {
-                Timeout::TimedOut => {
-                    if !timedout {
-                        meter.status = Timeout::Running;
-                    }
-                },
-                Timeout::Running => {
-                    if timedout {
-                        meter.status = Timeout::TimedOut;
-                        let on_timeout = meter.config.as_ref().unwrap().on_timeout.clone();
-                        if let Some(cmd) = on_timeout {
-                            let status = Command::new("sh")
-                                .arg("-c")
-                                .arg(cmd)
-                                .status();
-                            let Ok(status) = status.log_err() else {
-                                continue;
-                            };
-
-                            if status.success() {
-                                log::info!("Timeout command executed successfully")
-                            } else {
-                                log::warn!("Timeout command failed")
-                            }
-                        }
-                    }
-                }
-            }
+            meter.timeout();
         }
     }
 
@@ -361,6 +368,7 @@ impl Mixer {
                 raw as f32 / 256.0
             })
             .collect();
+        println!("{:?}", values);
         let val = values
             .get(4..5).context("Wrong size")?
             .iter()
