@@ -3,10 +3,17 @@ use crate::mixer::Mixer;
 
 impl Mixer {
     pub async fn exec_cmd(&self, cmd: &str, val: &[&str]) -> Result<()> {
-        if cmd == "reset-history" {
+        match cmd {
+            "reset-history" => {
             self.reset_history().await;
             return Ok(());
-        }
+            },
+            "force-timeout" => {
+                self.force_timeout().await;
+                return Ok(());
+            },
+            _ => ()
+        };
         if let Some(ready) = self.ready().await {
             match cmd {
                 "inc-vol" => {

@@ -142,6 +142,15 @@ impl MeterHistory {
         }
     }
 
+    pub fn force_timeout(&mut self) {
+        if !self.has_history() { return }
+
+        self.history.clear();
+        self.history.resize(self.max_history_size, MIN_METER_VAL);
+        self.current_minute_peak = MIN_METER_VAL;
+        self.timeout();
+    }
+
     pub fn has_history(&self) -> bool {
         return self.max_history_size > 0;
     }
@@ -237,6 +246,11 @@ impl Mixer {
     pub async fn reset_history(&self) {
         let mut history = self.meter.lock().await;
         history.reset();
+    }
+
+    pub async fn force_timeout(&self) {
+        let mut history = self.meter.lock().await;
+        history.force_timeout();
     }
 
     pub async fn heartbeat(self: Arc<Self>) {
